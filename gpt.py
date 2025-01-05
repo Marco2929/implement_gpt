@@ -1,6 +1,11 @@
+import tiktoken
 import torch
 import torch.nn as nn
+from sympy.codegen.ast import Raise
 from torch.nn import functional as F
+
+from tokenizer_tests import vocab_size
+from utils import TokenizerType, UnknownTokenizerError
 
 # hyperparameters
 batch_size = 64  # how many independent sequences will we process in parallel?
@@ -16,28 +21,47 @@ n_layer = 6
 dropout = 0.2
 # ------------
 
-torch.manual_seed(1337)
+torch.manual_seed(42)
+
+
 
 # wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 with open('data/input.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
-# here are all the unique characters that occur in this text
-chars = sorted(list(set(text)))
-vocab_size = len(chars)
-# create a mapping from characters to integers
-# TODO: Bring in different tokenizers and test which one is better: BPE, T-Free...
-stoi = {ch: i for i, ch in enumerate(chars)}
-itos = {i: ch for i, ch in enumerate(chars)}
-encode = lambda s: [stoi[c] for c in s]  # encoder: take a string, output a list of integers
-decode = lambda l: ''.join([itos[i] for i in l])  # decoder: take a list of integers, output a string
+tokenizer = "tiktoken"
+enc = tiktoken.get_encoding("r50k_base")
 
-# Train and test splits
-data = torch.tensor(encode(text), dtype=torch.long)
-n = int(0.9 * len(data))  # first 90% will be train, rest val
-train_data = data[:n]
-val_data = data[n:]
+# Usage
+def tokenize_with_tiktoken(text):  # Tokenize the entire text as a single tokenized block
 
+    vocab_size = enc.n_vocab
+    data_tiktoken = torch.tensor(enc.encode(text), dtype=torch.long)
+
+    return vocab_size, data_tiktoken
+
+
+def tokenize_with_tfree(text):
+    # https://github.com/Aleph-Alpha/trigrams
+    pass
+
+
+if tokenizer == TokenizerType.TIKTOKEN:
+    vocab_size, data = tokenize_with_tiktoken(text)
+elif tokenizer == TokenizerType.TFREE:
+    tokenize_with_tfree(text)
+else:
+    raise UnknownTokenizerError(tokenizer)
+
+def train_val_split(data, split=0.9):
+
+    n = int(0.9 * len(data))  # first 90% will be train, rest val
+    train_data = data[:n]
+    val_data = data[n:]
+
+    return train_data, val_data
+
+train_data, val_data = train_val_split(data=data_tiktoken)
 
 # data loading
 def get_batch(split):
@@ -220,5 +244,5 @@ for iter in range(max_iters):
     optimizer.step()
 
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
+print(enc.decode(m.generate(context, max_new_tokens=500)[0].tolist()))
 
