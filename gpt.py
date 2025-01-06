@@ -1,105 +1,19 @@
-import tiktoken
 import torch
 import torch.nn as nn
-from sympy.codegen.ast import Raise
 from torch.nn import functional as F
-
-from tokenizer_tests import vocab_size
-from utils import TokenizerType, UnknownTokenizerError
-
-# hyperparameters
-batch_size = 64  # how many independent sequences will we process in parallel?
-block_size = 256  # what is the maximum context length for predictions?
-max_iters = 5000
-eval_interval = 500
-learning_rate = 3e-4
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-eval_iters = 200
-n_embd = 384
-n_head = 6
-n_layer = 6
-dropout = 0.2
-# ------------
-
-torch.manual_seed(42)
-
-
-
-# wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
-with open('data/input.txt', 'r', encoding='utf-8') as f:
-    text = f.read()
-
-tokenizer = "tiktoken"
-enc = tiktoken.get_encoding("r50k_base")
-
-# Usage
-def tokenize_with_tiktoken(text):  # Tokenize the entire text as a single tokenized block
-
-    vocab_size = enc.n_vocab
-    data_tiktoken = torch.tensor(enc.encode(text), dtype=torch.long)
-
-    return vocab_size, data_tiktoken
-
-
-def tokenize_with_tfree(text):
-    # https://github.com/Aleph-Alpha/trigrams
-    pass
-
-
-if tokenizer == TokenizerType.TIKTOKEN:
-    vocab_size, data = tokenize_with_tiktoken(text)
-elif tokenizer == TokenizerType.TFREE:
-    tokenize_with_tfree(text)
-else:
-    raise UnknownTokenizerError(tokenizer)
-
-def train_val_split(data, split=0.9):
-
-    n = int(0.9 * len(data))  # first 90% will be train, rest val
-    train_data = data[:n]
-    val_data = data[n:]
-
-    return train_data, val_data
-
-train_data, val_data = train_val_split(data=data_tiktoken)
-
-# data loading
-def get_batch(split):
-    # generate a small batch of data of inputs x and targets y
-    data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i + block_size] for i in ix])
-    y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
-    x, y = x.to(device), y.to(device)
-    return x, y
-
-
-@torch.no_grad()
-def estimate_loss():
-    out = {}
-    model.eval()
-    for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            X, Y = get_batch(split)
-            logits, loss = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
-    model.train()
-    return out
 
 
 class Head(nn.Module):
     """ one head of self-attention """
 
-    def __init__(self, head_size):
+    def __init__(self, config, head_size):
         super().__init__()
-        self.key = nn.Linear(n_embd, head_size, bias=False)
-        self.query = nn.Linear(n_embd, head_size, bias=False)
-        self.value = nn.Linear(n_embd, head_size, bias=False)
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.key = nn.Linear(config.n_embd, head_size, bias=False)
+        self.query = nn.Linear(config.n_embd, head_size, bias=False)
+        self.value = nn.Linear(config.n_embd, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(config.block_size, config.block_size)))
 
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         B, T, C = x.shape
@@ -120,11 +34,12 @@ class Head(nn.Module):
 class MultiHeadAttention(nn.Module):
     """ multiple heads of self-attention in parallel """
 
-    def __init__(self, num_heads, head_size):
+    def __init__(self, config):
         super().__init__()
-        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
-        self.proj = nn.Linear(head_size * num_heads, n_embd)
-        self.dropout = nn.Dropout(dropout)
+        head_size = config.n_embd // config.n_head
+        self.heads = nn.ModuleList([Head(config, head_size) for _ in range(config.n_head)])
+        self.proj = nn.Linear(head_size * config.n_head, config.n_embd)
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         out = torch.cat([h(x) for h in self.heads], dim=-1)
@@ -135,13 +50,13 @@ class MultiHeadAttention(nn.Module):
 class FeedForward(nn.Module):
     """ a simple linear layer followed by a non-linearity """
 
-    def __init__(self, n_embd):
+    def __init__(self, config):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd),
+            nn.Linear(config.n_embd, 4 * config.n_embd),
             nn.ReLU(),
-            nn.Linear(4 * n_embd, n_embd),
-            nn.Dropout(dropout),
+            nn.Linear(4 * config.n_embd, config.n_embd),
+            nn.Dropout(config.dropout),
         )
 
     def forward(self, x):
@@ -151,13 +66,12 @@ class FeedForward(nn.Module):
 class Block(nn.Module):
     """ Transformer block: communication followed by computation """
 
-    def __init__(self, n_embd, n_head):
+    def __init__(self, config):
         super().__init__()
-        head_size = n_embd // n_head
-        self.sa = MultiHeadAttention(n_head, head_size)
-        self.ffwd = FeedForward(n_embd)
-        self.ln1 = nn.LayerNorm(n_embd)
-        self.ln2 = nn.LayerNorm(n_embd)
+        self.sa = MultiHeadAttention(config)
+        self.ffwd = FeedForward(config)
+        self.ln1 = nn.LayerNorm(config.n_embd)
+        self.ln2 = nn.LayerNorm(config.n_embd)
 
     def forward(self, x):
         x = x + self.sa(self.ln1(x))
@@ -167,14 +81,16 @@ class Block(nn.Module):
 
 class GPTLanguageModel(nn.Module):
 
-    def __init__(self):
+    def __init__(self, vocab_size, config):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
-        self.ln_f = nn.LayerNorm(n_embd)  # final layer norm
-        self.lm_head = nn.Linear(n_embd, vocab_size)
+        self.config = config
+        self.vocab_size = vocab_size
+        self.token_embedding_table = nn.Embedding(vocab_size, config.n_embd)
+        self.position_embedding_table = nn.Embedding(config.block_size, config.n_embd)
+        self.blocks = nn.Sequential(*[Block(config) for _ in range(config.n_layer)])
+        self.ln_f = nn.LayerNorm(config.n_embd)  # final layer norm
+        self.lm_head = nn.Linear(config.n_embd, vocab_size)
 
         self.apply(self._init_weights)
 
@@ -190,7 +106,7 @@ class GPTLanguageModel(nn.Module):
         B, T = idx.shape
 
         tok_emb = self.token_embedding_table(idx)
-        pos_emb = self.position_embedding_table(torch.arange(T, device=device))
+        pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device))
         x = tok_emb + pos_emb
         x = self.blocks(x)
         x = self.ln_f(x)
@@ -209,7 +125,7 @@ class GPTLanguageModel(nn.Module):
     def generate(self, idx, max_new_tokens):
         for _ in range(max_new_tokens):
             # crop idx to the last block_size tokens
-            idx_cond = idx[:, -block_size:]
+            idx_cond = idx[:, -self.config.block_size:]
             # get the predictions
             logits, loss = self(idx_cond)
             # focus only on the last time step
@@ -221,28 +137,3 @@ class GPTLanguageModel(nn.Module):
             # append sampled index to the running sequence
             idx = torch.cat((idx, idx_next), dim=1)
         return idx
-
-
-model = GPTLanguageModel()
-m = model.to(device)
-
-print(sum(p.numel() for p in m.parameters()) / 1e6, 'M parameters')
-
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-
-for iter in range(max_iters):
-
-    if iter % eval_interval == 0 or iter == max_iters - 1:
-        losses = estimate_loss()
-        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-
-    xb, yb = get_batch('train')
-
-    logits, loss = model(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
-
-context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(enc.decode(m.generate(context, max_new_tokens=500)[0].tolist()))
-

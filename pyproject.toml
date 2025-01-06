@@ -7,6 +7,7 @@ dependencies = [
   "tiktoken>=0.8.0",
   "torch==2.5.1+cu124 ; platform_system != 'Darwin'",
   "torchvision==0.20.1+cu124 ; platform_system != 'Darwin'",
+  "transformers>=4.47.1",
 ]
 
 [[tool.uv.index]]
